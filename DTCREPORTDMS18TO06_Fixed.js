@@ -195,15 +195,26 @@ function getFormattedDate(date) {
         }
 
         // ---------------------------------------------------------
-        // Step 4: Export Excel
-        // ---------------------------------------------------------
+       // --- Step 4: Export Excel ---
         console.log('4️⃣ Step 4: Clicking Export/Excel...');
         
-        cleanDownloadFolder(downloadPath);
+        // [แก้ไขใหม่] ใช้การลบทั้งโฟลเดอร์แล้วสร้างใหม่ (Force Clean) เพื่อความชัวร์ที่สุด
+        console.log('   Force cleaning download directory...');
+        try {
+            if (fs.existsSync(downloadPath)) {
+                // ลบโฟลเดอร์และไฟล์ข้างในทั้งหมดแบบ Force
+                fs.rmSync(downloadPath, { recursive: true, force: true });
+                console.log('      Download directory removed.');
+            }
+            // สร้างโฟลเดอร์ใหม่ทันที
+            fs.mkdirSync(downloadPath);
+            console.log('      Download directory recreated.');
+        } catch (e) {
+            console.log(`      ⚠️ Warning during force clean: ${e.message}`);
+        }
 
+        // กดปุ่ม Export
         const excelBtnSelector = '#btnexport, button[title="Excel"], ::-p-aria(Excel)';
-        
-        // รอให้ปุ่มปรากฏและคลิกได้
         await page.waitForSelector(excelBtnSelector, { visible: true, timeout: 60000 });
         
         console.log('   Clicking Export Button...');
@@ -212,7 +223,6 @@ function getFormattedDate(date) {
             if(btn) btn.click();
         });
         
-        // เพิ่มเวลารอ Download ให้นานขึ้น
         console.log('   ⏳ Waiting for download (30s)...');
         await new Promise(r => setTimeout(r, 30000));
 
@@ -272,3 +282,4 @@ function getFormattedDate(date) {
         await browser.close();
     }
 })();
+
