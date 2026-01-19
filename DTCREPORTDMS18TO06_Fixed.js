@@ -254,7 +254,8 @@ function getFormattedDate(date) {
                 from: `"DTC DMS Reporter" <${EMAIL_USER}>`, // ชื่อผู้ส่งแบบกำหนดเอง
                 to: EMAIL_TO,
                 subject: subjectLine,
-                text: 'รายงาน DTC DMS กะกลางคืน (18:00 - 06:00)\n\n(Auto-generated email)',
+                text: 'ถึง ผู้เกี่ยวข้อง',
+                'รายงาน DTC DMS กะกลางคืน (18:00 - 06:00)\n\n(Auto-generated email)',
                 attachments: [{ filename: fileName, path: filePath }] // ระบุ filename ชัดเจน
             });
 
@@ -282,4 +283,5 @@ function getFormattedDate(date) {
         await browser.close();
     }
 })();
+
 
