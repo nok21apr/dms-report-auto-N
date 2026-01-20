@@ -239,7 +239,7 @@ async function convertHtmlToExcel(sourcePath, destPath) {
                 from: `"DTC DMS Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
                 subject: subject,
-                text: 'รายงาน DMS กะกลางคืน (18:00 - 06:00)\n(Auto-generated email with Beautified Excel)',
+                text: 'ถึง ผู้เกี่ยวข้อง\nรายงาน DMS กะกลางคืน (18:00 - 06:00)\n\nด้วยความนับถือ\n\nBot Report`,
                 attachments: [{ filename: nameToSend, path: fileToSend }]
             });
             console.log('📧 Email Sent!');
@@ -259,3 +259,4 @@ async function convertHtmlToExcel(sourcePath, destPath) {
         await browser.close();
     }
 })();
+
