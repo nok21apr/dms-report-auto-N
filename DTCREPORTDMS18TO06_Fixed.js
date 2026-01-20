@@ -2,7 +2,7 @@ const puppeteer = require('puppeteer');
 const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
-const XLSX = require('xlsx');
+const ExcelJS = require('exceljs'); // เปลี่ยนมาใช้ exceljs
 const { JSDOM } = require('jsdom');
 
 // ฟังก์ชันแปลงวันที่
@@ -11,66 +11,80 @@ function getFormattedDate(date) {
     return new Intl.DateTimeFormat('en-CA', options).format(date);
 }
 
-// ฟังก์ชันคำนวณความกว้างตัวอักษร (รองรับภาษาไทย)
-function getTextWidth(text) {
-    if (!text) return 0;
-    const str = String(text);
-    let width = 0;
-    for (let i = 0; i < str.length; i++) {
-        const code = str.charCodeAt(i);
-        // ภาษาไทยและตัวอักษรพิเศษกว้างกว่าปกตินิดหน่อย
-        if (code >= 0x0E00 && code <= 0x0E7F) width += 1.3;
-        else if (code >= 0x20 && code <= 0x7E) width += 1;
-        else width += 1.2;
-    }
-    return width;
-}
-
-// ฟังก์ชันแปลง HTML เป็น Excel แบบจัดเต็ม
-function convertHtmlToExcel(sourcePath, destPath) {
+// ฟังก์ชันแปลง HTML เป็น Excel แบบสวยงาม (ใช้ ExcelJS)
+async function convertHtmlToExcel(sourcePath, destPath) {
     try {
-        console.log(`   Converting HTML-XLS to Real XLSX (Perfect Mode)...`);
+        console.log(`   Converting HTML-XLS to Beautiful XLSX (ExcelJS)...`);
+        
+        // 1. อ่านและ Parse HTML
         const htmlContent = fs.readFileSync(sourcePath, 'utf-8');
         const dom = new JSDOM(htmlContent);
-        const document = dom.window.document;
-        const table = document.querySelector('table');
+        const table = dom.window.document.querySelector('table');
         
         if (!table) throw new Error('No table found in downloaded file');
 
-        // แปลง Table เป็น Array of Arrays เพื่อจัดการข้อมูลง่ายกว่า
-        const ws = XLSX.utils.table_to_sheet(table, { raw: true });
+        // 2. สร้าง Workbook และ Worksheet ใหม่
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('DMS Report');
 
-        // --- 1. จัดการความกว้างคอลัมน์ (Auto-fit) ---
-        const range = XLSX.utils.decode_range(ws['!ref']);
-        const colWidths = [];
+        // 3. ดึงข้อมูลจาก HTML Table
+        const rows = Array.from(table.querySelectorAll('tr'));
         
-        for (let C = range.s.c; C <= range.e.c; ++C) {
-            let maxWidth = 10; // ความกว้างขั้นต่ำ
-            for (let R = range.s.r; R <= range.e.r; ++R) {
-                const cellRef = XLSX.utils.encode_cell({ c: C, r: R });
-                const cell = ws[cellRef];
-                if (cell && cell.v) {
-                    // ทำความสะอาดข้อมูล (ลบ HTML Tags ถ้ามี)
-                    const textValue = String(cell.v).replace(/<[^>]*>/g, '').trim();
-                    cell.v = textValue; // อัปเดตค่าที่คลีนแล้วกลับไป
-                    
-                    const width = getTextWidth(textValue) + 2; // บวก padding
-                    if (width > maxWidth) maxWidth = width;
+        // วนลูปทีละแถว
+        rows.forEach((row, rowIndex) => {
+            const cells = Array.from(row.querySelectorAll('td, th'));
+            const rowData = cells.map(cell => {
+                // Clean data: ลบ html tags และ space ส่วนเกิน
+                return cell.textContent.replace(/<[^>]*>/g, '').trim();
+            });
+            
+            // เพิ่มแถวลงใน Excel
+            const excelRow = worksheet.addRow(rowData);
+
+            // --- ตกแต่ง (Styling) ---
+            excelRow.eachCell((cell, colNumber) => {
+                // ใส่เส้นขอบ (Borders) ทุกช่อง
+                cell.border = {
+                    top: { style: 'thin' },
+                    left: { style: 'thin' },
+                    bottom: { style: 'thin' },
+                    right: { style: 'thin' }
+                };
+
+                // จัด Alignment (กึ่งกลางแนวตั้ง, ซ้ายแนวนอน)
+                cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+
+                // ถ้าเป็น Header (แถวแรก) หรือ tag <th>
+                if (rowIndex === 0 || cells[colNumber-1].tagName === 'TH') {
+                    cell.font = { bold: true, color: { argb: '000000' } }; // ตัวหนา
+                    cell.fill = {
+                        type: 'pattern',
+                        pattern: 'solid',
+                        fgColor: { argb: 'FFD3D3D3' } // พื้นหลังสีเทาอ่อน
+                    };
+                    cell.alignment = { vertical: 'middle', horizontal: 'center' }; // Header จัดกึ่งกลาง
                 }
+            });
+        });
+
+        // 4. Auto-fit Column Width (คำนวณความกว้าง)
+        worksheet.columns.forEach(column => {
+            let maxLength = 0;
+            if (column.values) {
+                column.values.forEach(val => {
+                    const len = val ? String(val).length : 0;
+                    if (len > maxLength) maxLength = len;
+                });
             }
-            // จำกัดความกว้างสูงสุดไม่ให้ล้นจอเกินไป
-            colWidths[C] = { wch: Math.min(maxWidth, 60) }; 
-        }
-        ws['!cols'] = colWidths;
+            // เผื่อความกว้างนิดหน่อย (Limit ไม่ให้เกิน 50)
+            column.width = Math.min(Math.max(maxLength + 2, 10), 50);
+        });
 
-        // --- 2. สร้าง Workbook ---
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, "DMS Report");
-
-        // --- 3. เขียนไฟล์ ---
-        XLSX.writeFile(wb, destPath);
+        // 5. บันทึกไฟล์
+        await workbook.xlsx.writeFile(destPath);
         console.log(`   Conversion success: ${destPath}`);
         return true;
+
     } catch (e) {
         console.error(`   Conversion failed: ${e.message}`);
         return false;
@@ -181,7 +195,7 @@ function convertHtmlToExcel(sourcePath, destPath) {
         // Step 4: Export
         console.log('4️⃣ Step 4: Clicking Export/Excel...');
         
-        // Force Clean again before download
+        // Force Clean again
         try {
             if (fs.existsSync(downloadPath)) {
                 fs.rmSync(downloadPath, { recursive: true, force: true });
@@ -207,8 +221,9 @@ function convertHtmlToExcel(sourcePath, destPath) {
             const newFileName = recentFile.name.replace(/\.xls$/, '') + '.xlsx';
             const newFilePath = path.join(downloadPath, newFileName);
             
-            // Convert
-            const converted = convertHtmlToExcel(originalPath, newFilePath);
+            // Convert using ExcelJS (ต้อง await)
+            const converted = await convertHtmlToExcel(originalPath, newFilePath);
+            
             const fileToSend = converted ? newFilePath : originalPath;
             const nameToSend = converted ? newFileName : recentFile.name;
 
@@ -224,8 +239,8 @@ function convertHtmlToExcel(sourcePath, destPath) {
                 from: `"DTC DMS Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
                 subject: subject,
-                text: `ถึง ผู้เกี่ยวข้อง\nรายงาน DTC DMS กะกลางคืน (18:00 - 06:00)\n\n(Auto-generated email)`,
-                attachments: [{ filename: fileName, path: filePath }] // ระบุ filename ชัดเจน
+                text: 'รายงาน DMS กะกลางคืน (18:00 - 06:00)\n(Auto-generated email with Beautified Excel)',
+                attachments: [{ filename: nameToSend, path: fileToSend }]
             });
             console.log('📧 Email Sent!');
             
@@ -244,4 +259,3 @@ function convertHtmlToExcel(sourcePath, destPath) {
         await browser.close();
     }
 })();
-
