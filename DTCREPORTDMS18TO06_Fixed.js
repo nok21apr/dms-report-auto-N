@@ -223,7 +223,7 @@ function convertHtmlToExcel(sourcePath, destPath) {
             await transporter.sendMail({
                 from: `"DTC DMS Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
-                subject: subjectLine,
+                subject: subject,
                 text: `ถึง ผู้เกี่ยวข้อง\nรายงาน DTC DMS กะกลางคืน (18:00 - 06:00)\n\n(Auto-generated email)`,
                 attachments: [{ filename: fileName, path: filePath }] // ระบุ filename ชัดเจน
             });
@@ -244,3 +244,4 @@ function convertHtmlToExcel(sourcePath, destPath) {
         await browser.close();
     }
 })();
+
