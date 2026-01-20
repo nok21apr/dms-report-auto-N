@@ -2,287 +2,245 @@ const puppeteer = require('puppeteer');
 const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
+const XLSX = require('xlsx');
+const { JSDOM } = require('jsdom');
 
-// ฟังก์ชันสำหรับแปลงวันที่เป็น YYYY-MM-DD (รับค่า Date Object)
+// ฟังก์ชันแปลงวันที่
 function getFormattedDate(date) {
     const options = { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Bangkok' };
-    const thaiDate = new Intl.DateTimeFormat('en-CA', options).format(date);
-    return thaiDate;
+    return new Intl.DateTimeFormat('en-CA', options).format(date);
+}
+
+// ฟังก์ชันคำนวณความกว้างตัวอักษร (รองรับภาษาไทย)
+function getTextWidth(text) {
+    if (!text) return 0;
+    const str = String(text);
+    let width = 0;
+    for (let i = 0; i < str.length; i++) {
+        const code = str.charCodeAt(i);
+        // ภาษาไทยและตัวอักษรพิเศษกว้างกว่าปกตินิดหน่อย
+        if (code >= 0x0E00 && code <= 0x0E7F) width += 1.3;
+        else if (code >= 0x20 && code <= 0x7E) width += 1;
+        else width += 1.2;
+    }
+    return width;
+}
+
+// ฟังก์ชันแปลง HTML เป็น Excel แบบจัดเต็ม
+function convertHtmlToExcel(sourcePath, destPath) {
+    try {
+        console.log(`   Converting HTML-XLS to Real XLSX (Perfect Mode)...`);
+        const htmlContent = fs.readFileSync(sourcePath, 'utf-8');
+        const dom = new JSDOM(htmlContent);
+        const document = dom.window.document;
+        const table = document.querySelector('table');
+        
+        if (!table) throw new Error('No table found in downloaded file');
+
+        // แปลง Table เป็น Array of Arrays เพื่อจัดการข้อมูลง่ายกว่า
+        const ws = XLSX.utils.table_to_sheet(table, { raw: true });
+
+        // --- 1. จัดการความกว้างคอลัมน์ (Auto-fit) ---
+        const range = XLSX.utils.decode_range(ws['!ref']);
+        const colWidths = [];
+        
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+            let maxWidth = 10; // ความกว้างขั้นต่ำ
+            for (let R = range.s.r; R <= range.e.r; ++R) {
+                const cellRef = XLSX.utils.encode_cell({ c: C, r: R });
+                const cell = ws[cellRef];
+                if (cell && cell.v) {
+                    // ทำความสะอาดข้อมูล (ลบ HTML Tags ถ้ามี)
+                    const textValue = String(cell.v).replace(/<[^>]*>/g, '').trim();
+                    cell.v = textValue; // อัปเดตค่าที่คลีนแล้วกลับไป
+                    
+                    const width = getTextWidth(textValue) + 2; // บวก padding
+                    if (width > maxWidth) maxWidth = width;
+                }
+            }
+            // จำกัดความกว้างสูงสุดไม่ให้ล้นจอเกินไป
+            colWidths[C] = { wch: Math.min(maxWidth, 60) }; 
+        }
+        ws['!cols'] = colWidths;
+
+        // --- 2. สร้าง Workbook ---
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "DMS Report");
+
+        // --- 3. เขียนไฟล์ ---
+        XLSX.writeFile(wb, destPath);
+        console.log(`   Conversion success: ${destPath}`);
+        return true;
+    } catch (e) {
+        console.error(`   Conversion failed: ${e.message}`);
+        return false;
+    }
 }
 
 (async () => {
     // --- ส่วนการรับค่าจาก Secrets ---
-    const USERNAME = process.env.DTC_USERNAME;
-    const PASSWORD = process.env.DTC_PASSWORD;
-    const EMAIL_USER = process.env.EMAIL_USER;
-    const EMAIL_PASS = process.env.EMAIL_PASS;
-    const EMAIL_TO   = process.env.EMAIL_TO;
+    const { DTC_USERNAME, DTC_PASSWORD, EMAIL_USER, EMAIL_PASS, EMAIL_TO } = process.env;
 
-    if (!USERNAME || !PASSWORD || !EMAIL_USER || !EMAIL_PASS || !EMAIL_TO) {
+    if (!DTC_USERNAME || !DTC_PASSWORD || !EMAIL_USER || !EMAIL_PASS || !EMAIL_TO) {
         console.error('Error: Missing required secrets.');
         process.exit(1);
     }
 
     console.log('Launching browser...');
     const downloadPath = path.resolve('./downloads');
-    if (!fs.existsSync(downloadPath)) {
-        fs.mkdirSync(downloadPath);
+    
+    // Force clean folder
+    if (fs.existsSync(downloadPath)) {
+        try { fs.rmSync(downloadPath, { recursive: true, force: true }); } catch(e) {}
     }
+    fs.mkdirSync(downloadPath);
 
     const browser = await puppeteer.launch({
-        headless: true, // ตั้งเป็น false เพื่อดูการทำงานตอนเทสได้
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--start-maximized'
-        ]
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--start-maximized']
     });
     
     const page = await browser.newPage();
-    
-    // --- Setup ---
-    // Timeout 5 นาที (300000 ms) เพียงพอสำหรับการรอ 120 วินาที
     page.setDefaultNavigationTimeout(300000);
     page.setDefaultTimeout(300000);
-
     await page.emulateTimezone('Asia/Bangkok');
+
     const client = await page.target().createCDPSession();
     await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadPath });
-
     await page.setViewport({ width: 1920, height: 1080 });
 
     try {
-        // ---------------------------------------------------------
         // Step 1: Login
-        // ---------------------------------------------------------
         console.log('1️⃣ Step 1: Login...');
         await page.goto('https://gps.dtc.co.th/ultimate/index.php', { waitUntil: 'domcontentloaded' });
-        
         await page.waitForSelector('#txtname', { visible: true, timeout: 60000 });
-        await page.type('#txtname', USERNAME);
-        await page.type('#txtpass', PASSWORD);
-        
-        console.log('   Clicking Login...');
+        await page.type('#txtname', DTC_USERNAME);
+        await page.type('#txtpass', DTC_PASSWORD);
         await Promise.all([
-            page.evaluate(() => {
-                const btn = document.getElementById('btnLogin');
-                if(btn) btn.click();
-            }),
+            page.evaluate(() => document.getElementById('btnLogin').click()),
             page.waitForFunction(() => !document.querySelector('#txtname'), { timeout: 60000 })
         ]);
         console.log('✅ Login Success');
 
-        // ---------------------------------------------------------
-        // Step 2: Navigate to Report (Direct URL)
-        // ---------------------------------------------------------
-        console.log('2️⃣ Step 2: Go to Report Page (Direct URL)...');
+        // Step 2: Navigate
+        console.log('2️⃣ Step 2: Go to Report Page...');
         await page.goto('https://gps.dtc.co.th/ultimate/Report/report_other_status.php', { waitUntil: 'domcontentloaded' });
-        
         await page.waitForSelector('#date9', { visible: true, timeout: 60000 });
-        console.log('✅ Report Page Loaded');
 
-        // ---------------------------------------------------------
-        // Step 2.5: Select Truck "ทั้งหมด" (Direct DOM Method)
-        // ---------------------------------------------------------
+        // Step 2.5: Truck
         console.log('   Selecting Truck "ทั้งหมด"...');
-        await page.waitForSelector('#ddl_truck', { visible: true, timeout: 60000 });
-
-        // รอให้ Option โหลดมา
-        await page.waitForFunction(() => {
-            const select = document.getElementById('ddl_truck');
-            return select && select.options.length > 0;
-        }, { timeout: 60000 });
-
+        await page.waitForSelector('#ddl_truck', { visible: true });
+        await page.waitForFunction(() => document.getElementById('ddl_truck').options.length > 0);
         await page.evaluate(() => {
-            var selectElement = document.getElementById('ddl_truck'); 
-            if (selectElement) {
-                var options = selectElement.options; 
-                for (var i = 0; i < options.length; i++) { 
-                    if (options[i].text.includes('ทั้งหมด') || options[i].text.toLowerCase().includes('all')) { 
-                        selectElement.value = options[i].value; 
-                        var event = new Event('change', { bubbles: true });
-                        selectElement.dispatchEvent(event);
-                        break; 
-                    } 
+            const select = document.getElementById('ddl_truck');
+            for (let opt of select.options) {
+                if (opt.text.includes('ทั้งหมด') || opt.text.toLowerCase().includes('all')) {
+                    select.value = opt.value;
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
                 }
             }
         });
-        console.log('✅ Truck "ทั้งหมด" Selected');
 
-        // ---------------------------------------------------------
-        // Step 2.6: Select Report Types (Using #s2id_ddlharsh)
-        // ---------------------------------------------------------
-        console.log('   Selecting 3 Report Types (via #s2id_ddlharsh)...');
-        
-        const select2ContainerSelector = '#s2id_ddlharsh';
-        const select2InputSelector = '#s2id_ddlharsh input'; 
-        
-        const searchKeywords = [
-            "ความง่วงระดับ 1", 
-            "ความง่วงระดับ 2",
-            "หาว"       
-        ];
-
+        // Step 2.6: Report Types
+        console.log('   Selecting 3 Report Types...');
         try {
-            await page.waitForSelector(select2ContainerSelector, { visible: true, timeout: 30000 });
-            
-            for (const keyword of searchKeywords) {
-                console.log(`      Processing "${keyword}"...`);
-                await page.click(select2ContainerSelector);
-                await new Promise(r => setTimeout(r, 500)); 
-
-                const inputHandle = await page.$(select2InputSelector) || await page.$('.select2-input');
-                
-                if (inputHandle) {
-                    await inputHandle.type(keyword);
+            await page.waitForSelector('#s2id_ddlharsh', { visible: true });
+            const keywords = ["ความง่วงระดับ 1", "ความง่วงระดับ 2", "หาว"];
+            for (const kw of keywords) {
+                await page.click('#s2id_ddlharsh'); 
+                await new Promise(r => setTimeout(r, 500));
+                const input = await page.$('#s2id_ddlharsh input') || await page.$('.select2-input');
+                if (input) {
+                    await input.type(kw);
                     await new Promise(r => setTimeout(r, 1000));
                     await page.keyboard.press('Enter');
-                    console.log(`      Selected: "${keyword}"`);
+                    console.log(`      Selected: "${kw}"`);
                     await new Promise(r => setTimeout(r, 500));
-                } else {
-                    console.log(`      ⚠️ Could not find input field inside ${select2ContainerSelector}`);
                 }
             }
+        } catch (e) { console.log('❌ Error selecting reports:', e.message); }
 
-        } catch (e) {
-            console.log('      ❌ Error Selecting Report Types:', e.message);
-        }
-        
-        console.log('✅ Report Types Selection Finished');
-
-        // ---------------------------------------------------------
-        // Step 3: Setting Date Range 18:00 (Yesterday) - 06:00 (Today)
-        // ---------------------------------------------------------
-        console.log('3️⃣ Step 3: Setting Date Range 18:00 (Yesterday) - 06:00 (Today)...');
-        
+        // Step 3: Date Range 18:00 - 06:00
+        console.log('3️⃣ Step 3: Setting Date Range...');
         const now = new Date();
-        const todayStr = getFormattedDate(now); // วันที่ปัจจุบัน (เช่น 15)
-
         const yesterday = new Date(now);
-        yesterday.setDate(yesterday.getDate() - 1); // ย้อนหลัง 1 วัน (เช่น 14)
-        const yesterdayStr = getFormattedDate(yesterday);
-
-        // กำหนดเวลาเริ่ม: เมื่อวาน 18:00
-        const startDateTime = `${yesterdayStr} 18:00`;
-        // กำหนดเวลาจบ: วันนี้ 06:00 (วันรุ่งขึ้นของ 18:00)
-        const endDateTime = `${todayStr} 06:00`;
+        yesterday.setDate(yesterday.getDate() - 1);
+        const start = `${getFormattedDate(yesterday)} 18:00`;
+        const end = `${getFormattedDate(now)} 06:00`;
         
-        console.log(`      Range: ${startDateTime} to ${endDateTime}`);
-
         await page.evaluate(() => document.getElementById('date9').value = '');
-        await page.type('#date9', startDateTime);
-
+        await page.type('#date9', start);
         await page.evaluate(() => document.getElementById('date10').value = '');
-        await page.type('#date10', endDateTime);
-        
-        console.log('   Clicking Search to update report...');
-        try {
-            // ใช้ Selector จากไฟล์ Recording ที่คุณส่งมา: td:nth-of-type(5) > span
-            const searchSelector = 'td:nth-of-type(5) > span';
-            
-            // รอให้ปุ่มค้นหาพร้อม
-            await page.waitForSelector(searchSelector, { visible: true, timeout: 10000 });
-            await page.click(searchSelector);
-            
-            // --- NEW: Wait 120 Seconds ---
-            console.log('   ⏳ Waiting 120 seconds for report generation...');
-            // รอ 120,000 ms (120 วินาที)
-            await new Promise(r => setTimeout(r, 120000)); 
-            console.log('   ✅ Wait complete.');
+        await page.type('#date10', end);
 
-        } catch (e) {
-            console.log('⚠️ Warning: Could not click Search button or wait failed.', e.message);
-        }
+        console.log('   Clicking Search & Waiting 120s...');
+        await page.click('td:nth-of-type(5) > span');
+        await new Promise(r => setTimeout(r, 120000)); 
 
-        // ---------------------------------------------------------
-       // --- Step 4: Export Excel ---
+        // Step 4: Export
         console.log('4️⃣ Step 4: Clicking Export/Excel...');
         
-        // [แก้ไขใหม่] ใช้การลบทั้งโฟลเดอร์แล้วสร้างใหม่ (Force Clean) เพื่อความชัวร์ที่สุด
-        console.log('   Force cleaning download directory...');
+        // Force Clean again before download
         try {
             if (fs.existsSync(downloadPath)) {
-                // ลบโฟลเดอร์และไฟล์ข้างในทั้งหมดแบบ Force
                 fs.rmSync(downloadPath, { recursive: true, force: true });
-                console.log('      Download directory removed.');
+                fs.mkdirSync(downloadPath);
             }
-            // สร้างโฟลเดอร์ใหม่ทันที
-            fs.mkdirSync(downloadPath);
-            console.log('      Download directory recreated.');
-        } catch (e) {
-            console.log(`      ⚠️ Warning during force clean: ${e.message}`);
-        }
+        } catch(e) {}
 
-        // กดปุ่ม Export
-        const excelBtnSelector = '#btnexport, button[title="Excel"], ::-p-aria(Excel)';
-        await page.waitForSelector(excelBtnSelector, { visible: true, timeout: 60000 });
-        
-        console.log('   Clicking Export Button...');
-        await page.evaluate(() => {
-            const btn = document.querySelector('#btnexport') || document.querySelector('button[title="Excel"]');
-            if(btn) btn.click();
-        });
-        
-        console.log('   ⏳ Waiting for download (30s)...');
+        await page.waitForSelector('#btnexport', { visible: true });
+        await page.evaluate(() => document.querySelector('#btnexport').click());
+        console.log('   Waiting for download (30s)...');
         await new Promise(r => setTimeout(r, 30000));
 
-        // ---------------------------------------------------------
-        // Step 5: Email & Cleanup
-        // ---------------------------------------------------------
-        console.log('5️⃣ Step 5: Processing email...');
+        // Step 5: Convert & Email
+        console.log('5️⃣ Step 5: Preparing Email...');
         const files = fs.readdirSync(downloadPath).filter(f => !f.startsWith('.'));
-        
         if (files.length > 0) {
-            // หาไฟล์ล่าสุด
             const recentFile = files.map(f => ({ 
                 name: f, 
                 time: fs.statSync(path.join(downloadPath, f)).mtime.getTime() 
             })).sort((a, b) => b.time - a.time)[0];
 
-            const filePath = path.join(downloadPath, recentFile.name);
-            const fileName = recentFile.name;
-            const subjectLine = `${fileName} ช่วง1800ถึง0600`;
+            const originalPath = path.join(downloadPath, recentFile.name);
+            const newFileName = recentFile.name.replace(/\.xls$/, '') + '.xlsx';
+            const newFilePath = path.join(downloadPath, newFileName);
+            
+            // Convert
+            const converted = convertHtmlToExcel(originalPath, newFilePath);
+            const fileToSend = converted ? newFilePath : originalPath;
+            const nameToSend = converted ? newFileName : recentFile.name;
+
+            const subject = `${recentFile.name} ช่วง1800ถึง0600`;
 
             const transporter = nodemailer.createTransport({
                 service: 'gmail',
                 auth: { user: EMAIL_USER, pass: EMAIL_PASS }
             });
 
-            // ปรับส่วนการส่งเมลตาม request
             console.log(`   Sending email to: ${EMAIL_TO}`);
             await transporter.sendMail({
-                from: `"DTC DMS Reporter" <${EMAIL_USER}>`, // ชื่อผู้ส่งแบบกำหนดเอง
+                from: `"DTC DMS Reporter" <${EMAIL_USER}>`,
                 to: EMAIL_TO,
                 subject: subjectLine,
                 text: `ถึง ผู้เกี่ยวข้อง\nรายงาน DTC DMS กะกลางคืน (18:00 - 06:00)\n\n(Auto-generated email)`,
                 attachments: [{ filename: fileName, path: filePath }] // ระบุ filename ชัดเจน
             });
-
-            console.log('   Email sent successfully.');
-            console.log('   Deleting downloaded file...');
-            try {
-                fs.unlinkSync(filePath);
-                console.log('✅ File deleted successfully.');
-            } catch (err) {
-                console.error('⚠️ Error deleting file:', err);
-            }
+            console.log('📧 Email Sent!');
+            
+            try { fs.unlinkSync(originalPath); } catch(e){}
+            if(converted) try { fs.unlinkSync(newFilePath); } catch(e){}
         } else {
-            console.log('❌ No file downloaded to send.');
-            await page.screenshot({ path: 'final_no_file.png' });
-            throw new Error('Download failed or no file found');
+            console.error('❌ No file found!');
+            process.exit(1);
         }
 
-        console.log('🎉 Script completed successfully.');
-
-    } catch (error) {
-        console.error('❌ Error occurred:', error);
-        await page.screenshot({ path: 'error_screenshot.png' });
+    } catch (err) {
+        console.error('❌ Error:', err);
+        await page.screenshot({ path: 'error.png' });
         process.exit(1);
     } finally {
         await browser.close();
     }
 })();
-
-
-
-
