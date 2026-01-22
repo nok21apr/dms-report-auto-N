@@ -227,7 +227,7 @@ async function convertHtmlToExcel(sourcePath, destPath) {
             const fileToSend = converted ? newFilePath : originalPath;
             const nameToSend = converted ? newFileName : recentFile.name;
 
-            const subject = `${recentFile.name} ช่วง1800ถึง0600`;
+            const subject = `${recentFile.name} รอบ 18:00 ถึง 06:00`;
 
             const transporter = nodemailer.createTransport({
                 service: 'gmail',
@@ -259,3 +259,4 @@ async function convertHtmlToExcel(sourcePath, destPath) {
         await browser.close();
     }
 })();
+
